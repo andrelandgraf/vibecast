@@ -1,0 +1,17 @@
+{
+  "name": "neon-preview",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@neondatabase/config": "link:../../neondatabase/neon-pkgs/packages/config",
+    "@neondatabase/env": "link:../../neondatabase/neon-pkgs/packages/env"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^5.8.3"
+  }
+}
