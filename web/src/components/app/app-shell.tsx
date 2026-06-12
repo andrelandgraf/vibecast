@@ -13,6 +13,7 @@ import {
   setActiveOrg,
   listImages,
   listPeople,
+  IMAGE_LIMIT_PER_ORG,
   type ImageRecord,
   type PersonRecord,
 } from '@/lib/agent-client';
@@ -203,9 +204,17 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
                   {runningCount > 0 && (
                     <span className="text-primary mr-2">{runningCount} generating…</span>
                   )}
-                  {images.length} image{images.length === 1 ? '' : 's'}
+                  <span className={images.length >= IMAGE_LIMIT_PER_ORG ? 'text-destructive' : ''}>
+                    {images.length} / {IMAGE_LIMIT_PER_ORG} images
+                  </span>
                 </span>
               </div>
+              {images.length >= IMAGE_LIMIT_PER_ORG && (
+                <p className="bg-destructive/10 text-destructive mb-3 rounded-lg px-3 py-2 text-xs">
+                  This workspace is at the free-plan limit of {IMAGE_LIMIT_PER_ORG} images. Delete
+                  some to generate more.
+                </p>
+              )}
               <ImageGallery
                 images={images}
                 loading={loadingImages}

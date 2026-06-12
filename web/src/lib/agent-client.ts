@@ -2,6 +2,9 @@
 
 const AGENT_URL = (process.env.NEXT_PUBLIC_AGENT_URL ?? '').replace(/\/+$/, '');
 
+export const IMAGE_LIMIT_PER_ORG = 10;
+export const ORG_LIMIT = 4;
+
 export type ImageRecord = {
   id: string;
   prompt: string;
@@ -71,8 +74,10 @@ async function request(path: string, init: RequestInit = {}, retry = true): Prom
     return request(path, init, false);
   }
   if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Request failed (${res.status})`);
+    const body = (await res.json().catch(() => null)) as
+      | { error?: string; message?: string }
+      | null;
+    throw new Error(body?.message ?? body?.error ?? `Request failed (${res.status})`);
   }
   return res;
 }

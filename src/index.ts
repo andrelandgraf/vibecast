@@ -8,7 +8,7 @@ import {
   type ModelMessage,
 } from 'ai';
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './lib/db';
 import { authenticate, corsHeaders } from './lib/auth';
 import { isMember } from './lib/org';
@@ -18,6 +18,7 @@ import { people, images } from './db/schema';
 const MODEL = 'databricks-gpt-5-mini';
 const PEOPLE_BUCKET = 'people';
 const GENERATED_BUCKET = 'generated';
+const MAX_IMAGES_PER_ORG = 10;
 
 type Ctx = { userId: string; userName: string; orgId: string };
 type ReferenceImagePart = { type: 'image'; image: Buffer; mediaType: string };
@@ -79,6 +80,19 @@ async function handleGenerate(request: Request, ctx: Ctx): Promise<Response> {
     messages: UIMessage[];
     personIds?: string[];
   };
+
+  // Free-plan cap: block generation when the workspace gallery is full.
+  const [{ value: imageCount }] = await db
+    .select({ value: count() })
+    .from(images)
+    .where(eq(images.organizationId, ctx.orgId));
+  if (imageCount >= MAX_IMAGES_PER_ORG) {
+    return json(request, 409, {
+      error: 'image_limit_reached',
+      message: `This workspace is at the free-plan limit of ${MAX_IMAGES_PER_ORG} images. Delete some to make room.`,
+    });
+  }
+
   const prompt = lastUserText(messages);
 
   const referenceParts = await loadReferenceImages(ctx.orgId, personIds ?? []);

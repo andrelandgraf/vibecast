@@ -56,7 +56,11 @@ export function OrgSwitcher() {
         slug: slugify(name),
       });
       if (error) {
-        toast.error(error.message ?? 'Could not create organization');
+        const msg =
+          error.code === 'YOU_HAVE_REACHED_THE_MAXIMUM_NUMBER_OF_ORGANIZATIONS'
+            ? 'You\u2019ve reached the free-plan limit of 4 workspaces.'
+            : (error.message ?? 'Could not create organization');
+        toast.error(msg);
         return;
       }
       if (data?.id) {
