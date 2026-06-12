@@ -6,13 +6,15 @@ export const people = pgTable(
     id: text('id')
       .primaryKey()
       .$defaultFn(() => crypto.randomUUID()),
-    userId: text('user_id').notNull(),
+    organizationId: text('organization_id').notNull(),
+    createdBy: text('created_by').notNull(),
+    createdByName: text('created_by_name').notNull().default(''),
     name: text('name').notNull(),
     bucketKey: text('bucket_key').notNull(),
     contentType: text('content_type').notNull().default('image/jpeg'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
-  (table) => [index('people_user_id_idx').on(table.userId)],
+  (table) => [index('people_org_idx').on(table.organizationId)],
 );
 
 export const images = pgTable(
@@ -21,12 +23,14 @@ export const images = pgTable(
     id: text('id')
       .primaryKey()
       .$defaultFn(() => crypto.randomUUID()),
-    userId: text('user_id').notNull(),
+    organizationId: text('organization_id').notNull(),
+    createdBy: text('created_by').notNull(),
+    createdByName: text('created_by_name').notNull().default(''),
     prompt: text('prompt').notNull(),
     bucketKey: text('bucket_key').notNull(),
     contentType: text('content_type').notNull().default('image/jpeg'),
     bytes: integer('bytes').notNull(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
-  (table) => [index('images_user_id_idx').on(table.userId)],
+  (table) => [index('images_org_idx').on(table.organizationId)],
 );

@@ -10,6 +10,8 @@ export default defineConfig({
   out: './drizzle',
   schema: './src/db/schema.ts',
   dialect: 'postgresql',
+  // Only manage the public schema; neon_auth is managed by Neon Auth.
+  schemaFilter: ['public'],
   dbCredentials: {
     url: env.postgres.databaseUrl,
   },

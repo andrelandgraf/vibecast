@@ -5,12 +5,14 @@ import { useRouter } from 'next/navigation';
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
 import { toast } from 'sonner';
-import { Sparkles, LogOut } from 'lucide-react';
+import { Sparkles, LogOut, Building2 } from 'lucide-react';
 import { authClient } from '@/lib/auth/client';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   getToken,
+  getActiveOrg,
+  setActiveOrg,
   agentConfigured,
   listImages,
   listPeople,
@@ -20,11 +22,18 @@ import {
 import { PeopleSidebar } from './people-sidebar';
 import { MentionComposer } from './mention-composer';
 import { ImageGallery } from './image-gallery';
+import { OrgSwitcher } from './org-switcher';
+import { InvitationsMenu } from './invitations-menu';
+import { TeamDialog } from './team-dialog';
 
 const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? '';
 
 export function AppShell({ userName, userEmail }: { userName: string; userEmail: string }) {
   const router = useRouter();
+  const { data: orgs } = authClient.useListOrganizations();
+  const { data: activeOrg } = authClient.useActiveOrganization();
+  const orgId = activeOrg?.id ?? null;
+
   const [people, setPeople] = useState<PersonRecord[]>([]);
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [loadingImages, setLoadingImages] = useState(true);
@@ -32,25 +41,41 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
   const refreshPeople = useCallback(async () => {
     try {
       setPeople(await listPeople());
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to load people');
+    } catch {
+      setPeople([]);
     }
   }, []);
 
   const refreshImages = useCallback(async () => {
     try {
       setImages(await listImages());
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to load images');
+    } catch {
+      setImages([]);
     } finally {
       setLoadingImages(false);
     }
   }, []);
 
+  // Auto-select the first workspace when none is active.
   useEffect(() => {
-    void refreshPeople();
-    void refreshImages();
-  }, [refreshPeople, refreshImages]);
+    if (!orgId && Array.isArray(orgs) && orgs.length > 0) {
+      void authClient.organization.setActive({ organizationId: orgs[0].id });
+    }
+  }, [orgId, orgs]);
+
+  // Propagate the active workspace to the agent client and (re)load its data.
+  useEffect(() => {
+    setActiveOrg(orgId);
+    if (orgId) {
+      setLoadingImages(true);
+      void refreshPeople();
+      void refreshImages();
+    } else {
+      setPeople([]);
+      setImages([]);
+      setLoadingImages(false);
+    }
+  }, [orgId, refreshPeople, refreshImages]);
 
   const transport = useMemo(
     () =>
@@ -60,6 +85,7 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
           const token = await getToken();
           const headers = new Headers(init?.headers);
           headers.set('authorization', `Bearer ${token}`);
+          headers.set('x-organization-id', getActiveOrg() ?? '');
           return fetch(input, { ...init, headers });
         },
       }),
@@ -80,6 +106,10 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
       toast.error('NEXT_PUBLIC_AGENT_URL is not configured');
       return;
     }
+    if (!orgId) {
+      toast.error('Select a workspace first');
+      return;
+    }
     await sendMessage({ text }, { body: { personIds } });
   }
 
@@ -93,14 +123,22 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="bg-background/80 sticky top-0 z-10 flex items-center justify-between border-b px-4 py-3 backdrop-blur sm:px-6">
-        <div className="flex items-center gap-2">
-          <div className="bg-primary/15 ring-primary/20 flex size-7 items-center justify-center rounded-lg ring-1">
-            <Sparkles className="size-4 text-primary" />
-          </div>
-          <span className="font-display text-[15px] font-semibold">Neon Image Studio</span>
-        </div>
+      <header className="bg-background/80 sticky top-0 z-10 flex items-center justify-between gap-2 border-b px-4 py-3 backdrop-blur sm:px-6">
         <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="bg-primary/15 ring-primary/20 flex size-7 items-center justify-center rounded-lg ring-1">
+              <Sparkles className="size-4 text-primary" />
+            </div>
+            <span className="font-display hidden text-[15px] font-semibold sm:inline">
+              Neon Image Studio
+            </span>
+          </div>
+          <div className="bg-border h-5 w-px" />
+          <OrgSwitcher />
+        </div>
+        <div className="flex items-center gap-1.5">
+          {orgId && <TeamDialog />}
+          <InvitationsMenu onAccepted={refreshImages} />
           <div className="hidden text-right sm:block">
             <p className="text-sm font-medium leading-none">{userName}</p>
             <p className="text-muted-foreground text-xs">{userEmail}</p>
@@ -114,33 +152,46 @@ export function AppShell({ userName, userEmail }: { userName: string; userEmail:
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col lg:flex-row">
-        <PeopleSidebar people={people} onChanged={refreshPeople} />
-
-        <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
-            <div className="mb-8">
-              <h1 className="font-display text-2xl font-semibold">
-                Create an image
-              </h1>
-              <p className="text-muted-foreground mb-4 text-sm">
-                Describe what you want. Tag people with{' '}
-                <span className="text-primary font-medium">@</span> to use their photos as a starting
-                point.
-              </p>
-              <MentionComposer people={people} status={status} onSubmit={handleGenerate} />
+      {!orgId ? (
+        <main className="flex flex-1 items-center justify-center p-6">
+          <div className="max-w-sm text-center">
+            <div className="bg-primary/10 mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl">
+              <Building2 className="size-6 text-primary" />
             </div>
-
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-base font-semibold">Gallery</h2>
-              <span className="text-muted-foreground text-xs">
-                {images.length} image{images.length === 1 ? '' : 's'}
-              </span>
-            </div>
-            <ImageGallery images={images} loading={loadingImages} onChanged={refreshImages} />
+            <h1 className="font-display text-xl font-semibold">Create a workspace</h1>
+            <p className="text-muted-foreground mt-1 text-sm">
+              Workspaces let you and your teammates share a gallery and a cast of people. Use the
+              workspace menu in the top-left to create your first one.
+            </p>
           </div>
         </main>
-      </div>
+      ) : (
+        <div className="flex flex-1 flex-col lg:flex-row">
+          <PeopleSidebar people={people} onChanged={refreshPeople} />
+
+          <main className="flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
+              <div className="mb-8">
+                <h1 className="font-display text-2xl font-semibold">Create an image</h1>
+                <p className="text-muted-foreground mb-4 text-sm">
+                  Describe what you want. Tag people with{' '}
+                  <span className="text-primary font-medium">@</span> to use their photos as a
+                  starting point.
+                </p>
+                <MentionComposer people={people} status={status} onSubmit={handleGenerate} />
+              </div>
+
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="font-display text-base font-semibold">Shared gallery</h2>
+                <span className="text-muted-foreground text-xs">
+                  {images.length} image{images.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <ImageGallery images={images} loading={loadingImages} onChanged={refreshImages} />
+            </div>
+          </main>
+        </div>
+      )}
     </div>
   );
 }

@@ -13,13 +13,15 @@ export function corsHeaders(request: Request): Record<string, string> {
   return {
     'access-control-allow-origin': origin,
     'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-    'access-control-allow-headers': 'authorization, content-type',
+    'access-control-allow-headers': 'authorization, content-type, x-organization-id',
     'access-control-max-age': '86400',
     vary: 'origin',
   };
 }
 
-export async function authenticate(request: Request): Promise<string | null> {
+export type Identity = { id: string; name: string };
+
+export async function authenticate(request: Request): Promise<Identity | null> {
   const header = request.headers.get('authorization');
   if (!header?.toLowerCase().startsWith('bearer ')) {
     return null;
@@ -27,7 +29,14 @@ export async function authenticate(request: Request): Promise<string | null> {
   const token = header.slice(7).trim();
   try {
     const { payload } = await jwtVerify(token, jwks, { issuer: ISSUER });
-    return typeof payload.sub === 'string' ? payload.sub : null;
+    if (typeof payload.sub !== 'string') return null;
+    const name =
+      typeof payload.name === 'string'
+        ? payload.name
+        : typeof payload.email === 'string'
+          ? payload.email
+          : '';
+    return { id: payload.sub, name };
   } catch (error) {
     console.error('[auth] token verification failed:', error);
     return null;

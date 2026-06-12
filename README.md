@@ -1,116 +1,98 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://neon.com/brand/neon-logo-dark-color.svg">
-  <source media="(prefers-color-scheme: light)" srcset="https://neon.com/brand/neon-logo-light-color.svg">
-  <img width="250px" alt="Neon Logo fallback" src="https://neon.com/brand/neon-logo-dark-color.svg">
-</picture>
+# Castmate
 
-# Getting started with Neon and the AI SDK
+An AI image studio where you **cast people into AI-generated scenes**. Upload photos of people, `@`-tag them in a prompt, and the model uses their photos as starting points. Work solo or invite teammates into a **shared workspace** with a collaborative gallery.
 
-An AI agent built with the [Vercel AI SDK](https://ai-sdk.dev), running on Neon Functions. It streams a chat completion through the [Neon AI Gateway](https://neon.com) and uses OpenAI's built-in `image_generation` tool: when the model calls it, a JPEG is generated, uploaded to a Neon-managed S3-compatible bucket, and indexed in [Neon](https://neon.com) Postgres via [Drizzle ORM](https://orm.drizzle.team).
+**Live demo:** https://neon-image-studio.vercel.app
 
-Everything the app needs — the database URL, the AI Gateway endpoint, and the object-storage credential — is declared in `neon.ts` and injected by `neonctl dev`, so there are no secrets to copy around.
+Built entirely on the Neon backend platform — **Auth, Functions, Object Storage, AI Gateway, and Postgres** — with a Next.js front end on Vercel.
 
-## Project structure
+---
+
+## Features
+
+- **Prompt-to-image** generation via the Vercel AI SDK, streamed from a Neon Function.
+- **People + `@`-mentions** — upload a person's photo, then type `@` to reference them (keyboard-navigable dropdown). Their photo becomes a reference/starting point for the generation.
+- **Gallery CRUD** — every generated image is saved; rename the caption, download, or delete.
+- **Team workspaces (organizations)** — an org switcher, invite teammates by email (in-app, no email sending), pending → accept invitation flow, and a **shared gallery + shared people** where every member sees each other's work with author attribution.
+- **Auth** via Neon Auth (Better Auth) with email/password.
+
+## Architecture
 
 ```
-with-ai-sdk/
-├── neon.ts             # Neon policy: AI Gateway + object-storage bucket + the function
-├── drizzle.config.ts   # Drizzle Kit config (schema location + DB credentials)
-├── tsconfig.json
-├── .env.example
-├── src/
-│   ├── index.ts        # The agent: streamText + image_generation tool, S3 + Drizzle persistence
-│   └── db/
-│       └── schema.ts   # Drizzle schema (images table)
-└── package.json
+Browser (Next.js on Vercel)
+  │  signs in with Neon Auth (proxy handler at /api/auth/[...path])
+  │  mints a short-lived JWT from /api/auth/token
+  ▼
+Neon Function  (the long-running, JWT-protected backend — no Vercel timeout)
+  • verifies the Neon Auth JWT against NEON_AUTH_JWKS_URL
+  • verifies workspace membership against neon_auth.member
+  • generate + people/images CRUD, all scoped by organization_id
+  • talks to the AI Gateway, Object Storage, and Postgres (all in-region)
 ```
 
-## What it does
+Key decisions:
 
-`POST /` with an AI-SDK-style messages payload:
+- **The browser calls the Neon Function directly** (not through a Next.js route) so the long image-generation stream isn't subject to a serverless host timeout. The JWT is minted on the Next.js backend and sent as a bearer token. See the [`neon-functions` agent skill](https://github.com/neondatabase/agent-skills/blob/main/skills/neon-functions/SKILL.md) for this pattern.
+- **All object-storage access lives inside the Function**, where the platform injects valid S3 credentials at runtime. People photos and generated images are stored in Neon Object Storage buckets; the Function serves them via presigned URLs.
+- **Multi-tenancy** is enforced server-side: the client sends the active workspace via `x-organization-id`, and the Function verifies membership (`neon_auth.member`) and scopes every query + bucket key by `organization_id`.
 
-```json
-{ "messages": [{ "role": "user", "content": "Draw a watercolor of a sleepy elephant." }] }
+### Layout
+
+```
+.
+├── neon.ts                 # Neon IaC: auth + AI Gateway + buckets + functions
+├── src/                    # Neon Function (the backend)
+│   ├── index.ts            # JWT-protected router: generate, people CRUD, images CRUD
+│   ├── db/schema.ts        # Drizzle schema (people, images) — org-scoped
+│   └── lib/                # auth (JWKS verify), org (membership), storage (S3), db
+└── web/                    # Next.js app (Vercel)
+    └── src/
+        ├── app/            # login + protected studio
+        ├── components/app/ # org switcher, invitations, team, people, composer, gallery
+        └── lib/            # Neon Auth client/server + agent API client
 ```
 
-The handler:
+## Provisioned services (`neon.ts`)
 
-1. Streams the assistant's response as a UI-message stream (consumable by the AI SDK React/Vue/Svelte hooks).
-2. Uses an OpenAI/GPT-5 model on the Neon AI Gateway (`databricks-gpt-5-mini`) with the AI SDK's built-in `openai.tools.imageGeneration()` tool.
-3. When the model generates an image, the handler uploads the returned JPEG to your bucket and records the prompt + key + size in Postgres, logging a presigned view URL.
+```ts
+export default defineConfig({
+  auth: true,                         // Neon Auth (Better Auth) + organization plugin
+  preview: {
+    aiGateway: true,                  // model routing (gpt-image via the gateway)
+    buckets: { people: {}, generated: {} },
+    functions: { imagegen: { source: 'src/index.ts' }, report: { source: 'src/report.ts' } },
+  },
+});
+```
 
-> Notes on the gateway's image generation: it's the OpenAI Responses **`image_generation`** built-in tool (GPT-5 models only — there is no separate images endpoint), and the image is returned **inline as base64**. The gateway caps a response at ~640 KB, so this example requests a compressed JPEG (`outputFormat: 'jpeg'`, `quality: 'low'`, `outputCompression`) to stay under it; high-quality/large images can exceed the cap or hit the ~60s gateway timeout.
+Provision with `neonctl deploy` (alias for `neonctl config apply`).
 
-## Clone the repository
+## Local development
+
+> Object Storage currently only works inside a **deployed** Function: `neonctl env pull` injects a credential the storage data plane rejects, while the deployed runtime gets a valid one. So image generation/storage is best verified against the deployed Function. Auth and the UI work locally.
 
 ```bash
-npx degit neondatabase/examples/with-ai-sdk ./with-ai-sdk
-cd with-ai-sdk
-```
-
-## Install and authenticate the Neon CLI
-
-```bash
-npm i -g neonctl
-neon login
-```
-
-## Install dependencies
-
-```bash
+# Function
 npm install
+neon dev                  # serves the function locally with env injected
+
+# Web
+cd web
+bun install
+bun run dev               # http://localhost:3000
 ```
 
-## Link your Neon project
+`web/.env.local` needs `NEON_AUTH_BASE_URL`, `NEON_AUTH_COOKIE_SECRET`, and `NEXT_PUBLIC_AGENT_URL` (the Function URL).
+
+## Deploy
 
 ```bash
-neon link
+neonctl deploy                                   # deploy the Function + apply neon.ts
+cd web && vercel build --prod && vercel deploy --prebuilt --prod
 ```
 
-If you let your agent drive this, add `--agent` to skip interactive mode.
+Set on Vercel: `NEON_AUTH_BASE_URL`, `NEON_AUTH_COOKIE_SECRET`, `NEXT_PUBLIC_AGENT_URL` (and `DATABASE_URL` for schema migrations).
 
-## Configure your environment
+---
 
-`neon link` (and `neon env pull`) write your branch-scoped variables into `.env.local`. Because `neon.ts` enables the AI Gateway and a bucket, the pull also mints a branch credential and writes `OPENAI_API_KEY` / `OPENAI_BASE_URL` and the `AWS_*` storage variables. See `.env.example` for the full set.
-
-## Apply the schema
-
-```bash
-npm run db:push
-```
-
-## Run locally
-
-```bash
-neon dev
-```
-
-Then in another shell (use the port `neon dev` printed):
-
-```bash
-curl -N -X POST http://localhost:8787 \
-  -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Please draw a robot reading a book."}]}'
-```
-
-You'll see the streaming response, and once the tool runs, a new row in the `images` table plus a `.jpg` object in your bucket (the logs print a presigned view URL).
-
-To continue the conversation, send the running transcript back (this agent is stateless — the client owns the history):
-
-```bash
-curl -N -X POST http://localhost:8787 \
-  -H 'content-type: application/json' \
-  -d '{"messages":[
-    {"role":"user","content":"Please draw a robot reading a book."},
-    {"role":"assistant","content":"Here is a friendly robot reading under a warm lamp."},
-    {"role":"user","content":"Now draw the same robot, but make it red."}
-  ]}'
-```
-
-## Deploy to Neon Functions
-
-```bash
-neon deploy
-```
-
-This applies the `neon.ts` policy (creating the bucket + enabling the AI Gateway on the branch if needed) and deploys the agent as a Neon Function.
+Built as a demo of the Neon backend platform (Auth · Functions · Object Storage · AI Gateway · Postgres).

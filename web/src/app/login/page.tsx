@@ -111,7 +111,7 @@ export default function LoginPage() {
               />
             </div>
           </CardContent>
-          <CardFooter className="flex-col gap-3">
+          <CardFooter className="flex-col gap-3 pt-2">
             <Button type="submit" className="w-full" disabled={loading}>
               {loading && <Loader2 className="size-4 animate-spin" />}
               {mode === 'signin' ? 'Sign in' : 'Create account'}

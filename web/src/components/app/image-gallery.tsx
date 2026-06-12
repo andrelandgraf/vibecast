@@ -145,6 +145,7 @@ export function ImageGallery({
                 {img.prompt}
               </p>
               <p className="text-muted-foreground mt-1 text-xs">
+                {img.createdByName ? `${img.createdByName} · ` : ''}
                 {new Date(img.createdAt).toLocaleString()}
               </p>
             </div>

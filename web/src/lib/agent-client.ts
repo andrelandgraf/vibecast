@@ -7,6 +7,7 @@ export type ImageRecord = {
   prompt: string;
   contentType: string;
   bytes: number;
+  createdByName: string;
   createdAt: string;
   url: string;
 };
@@ -14,12 +15,23 @@ export type ImageRecord = {
 export type PersonRecord = {
   id: string;
   name: string;
+  createdByName: string;
   createdAt: string;
   photoUrl: string;
 };
 
 export function agentConfigured(): boolean {
   return AGENT_URL.length > 0;
+}
+
+let activeOrgId: string | null = null;
+
+export function setActiveOrg(id: string | null): void {
+  activeOrgId = id;
+}
+
+export function getActiveOrg(): string | null {
+  return activeOrgId;
 }
 
 let cached: { token: string; expiresAt: number } | null = null;
@@ -44,10 +56,15 @@ export async function getToken(force = false): Promise<string> {
 
 async function request(path: string, init: RequestInit = {}, retry = true): Promise<Response> {
   if (!AGENT_URL) throw new Error('NEXT_PUBLIC_AGENT_URL is not configured');
+  if (!activeOrgId) throw new Error('No active organization');
   const token = await getToken();
   const res = await fetch(`${AGENT_URL}${path}`, {
     ...init,
-    headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` },
+    headers: {
+      ...(init.headers ?? {}),
+      authorization: `Bearer ${token}`,
+      'x-organization-id': activeOrgId,
+    },
   });
   if (res.status === 401 && retry) {
     cached = null;

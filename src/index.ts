@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './lib/db';
 import { authenticate, corsHeaders } from './lib/auth';
+import { isMember } from './lib/org';
 import { putObject, deleteObject, getObjectBase64, presignGet } from './lib/storage';
 import { people, images } from './db/schema';
 
@@ -18,6 +19,7 @@ const MODEL = 'databricks-gpt-5-mini';
 const PEOPLE_BUCKET = 'people';
 const GENERATED_BUCKET = 'generated';
 
+type Ctx = { userId: string; userName: string; orgId: string };
 type ReferenceImagePart = { type: 'image'; image: Buffer; mediaType: string };
 
 function json(request: Request, status: number, data: unknown): Response {
@@ -33,26 +35,35 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
-    const userId = await authenticate(request);
-    if (!userId) {
+    const identity = await authenticate(request);
+    if (!identity) {
       return json(request, 401, { error: 'Unauthorized' });
     }
 
+    const orgId = request.headers.get('x-organization-id');
+    if (!orgId) {
+      return json(request, 400, { error: 'No active organization' });
+    }
+    if (!(await isMember(orgId, identity.id))) {
+      return json(request, 403, { error: 'Not a member of this organization' });
+    }
+
+    const ctx: Ctx = { userId: identity.id, userName: identity.name, orgId };
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
     const method = request.method;
 
     try {
-      if (path === '/' && method === 'POST') return await handleGenerate(request, userId);
-      if (path === '/people' && method === 'GET') return await listPeople(request, userId);
-      if (path === '/people' && method === 'POST') return await createPerson(request, userId);
+      if (path === '/' && method === 'POST') return await handleGenerate(request, ctx);
+      if (path === '/people' && method === 'GET') return await listPeople(request, ctx);
+      if (path === '/people' && method === 'POST') return await createPerson(request, ctx);
       if (path.startsWith('/people/') && method === 'DELETE')
-        return await deletePerson(request, userId, path.slice('/people/'.length));
-      if (path === '/images' && method === 'GET') return await listImages(request, userId);
+        return await deletePerson(request, ctx, path.slice('/people/'.length));
+      if (path === '/images' && method === 'GET') return await listImages(request, ctx);
       if (path.startsWith('/images/') && method === 'PATCH')
-        return await patchImage(request, userId, path.slice('/images/'.length));
+        return await patchImage(request, ctx, path.slice('/images/'.length));
       if (path.startsWith('/images/') && method === 'DELETE')
-        return await deleteImage(request, userId, path.slice('/images/'.length));
+        return await deleteImage(request, ctx, path.slice('/images/'.length));
       return json(request, 404, { error: 'Not found' });
     } catch (error) {
       console.error(`[${method} ${path}] error:`, error);
@@ -63,14 +74,14 @@ export default {
   },
 };
 
-async function handleGenerate(request: Request, userId: string): Promise<Response> {
+async function handleGenerate(request: Request, ctx: Ctx): Promise<Response> {
   const { messages, personIds } = (await request.json()) as {
     messages: UIMessage[];
     personIds?: string[];
   };
   const prompt = lastUserText(messages);
 
-  const referenceParts = await loadReferenceImages(userId, personIds ?? []);
+  const referenceParts = await loadReferenceImages(ctx.orgId, personIds ?? []);
   const modelMessages = withReferenceImages(convertToModelMessages(messages), referenceParts);
 
   let generated: { base64: string; mediaType: string } | null = null;
@@ -106,22 +117,24 @@ async function handleGenerate(request: Request, userId: string): Promise<Respons
   let viewUrl: string | null = null;
   if (generated) {
     const buffer = Buffer.from(generated.base64, 'base64');
-    const key = `${userId}/${randomUUID()}.jpg`;
+    const key = `${ctx.orgId}/${randomUUID()}.jpg`;
     await putObject(GENERATED_BUCKET, key, buffer, generated.mediaType);
     await db.insert(images).values({
-      userId,
+      organizationId: ctx.orgId,
+      createdBy: ctx.userId,
+      createdByName: ctx.userName,
       prompt,
       bucketKey: key,
       contentType: generated.mediaType,
       bytes: buffer.byteLength,
     });
     viewUrl = await presignGet(GENERATED_BUCKET, key);
-    console.log(`[persist] stored ${GENERATED_BUCKET}/${key} (${buffer.byteLength} bytes)`);
+    console.log(`[persist] ${GENERATED_BUCKET}/${key} (${buffer.byteLength}b) org=${ctx.orgId}`);
   }
 
   if (!text) {
     text = generated
-      ? 'Here is your image — saved to your library.'
+      ? 'Here is your image — saved to your gallery.'
       : 'I was not able to generate an image this time. Please try again.';
   }
 
@@ -140,16 +153,17 @@ async function handleGenerate(request: Request, userId: string): Promise<Respons
   return createUIMessageStreamResponse({ stream, headers: corsHeaders(request) });
 }
 
-async function listPeople(request: Request, userId: string): Promise<Response> {
+async function listPeople(request: Request, ctx: Ctx): Promise<Response> {
   const rows = await db
     .select()
     .from(people)
-    .where(eq(people.userId, userId))
+    .where(eq(people.organizationId, ctx.orgId))
     .orderBy(desc(people.createdAt));
   const result = await Promise.all(
     rows.map(async (row) => ({
       id: row.id,
       name: row.name,
+      createdByName: row.createdByName,
       createdAt: row.createdAt,
       photoUrl: await presignGet(PEOPLE_BUCKET, row.bucketKey),
     })),
@@ -157,7 +171,7 @@ async function listPeople(request: Request, userId: string): Promise<Response> {
   return json(request, 200, { people: result });
 }
 
-async function createPerson(request: Request, userId: string): Promise<Response> {
+async function createPerson(request: Request, ctx: Ctx): Promise<Response> {
   const body = (await request.json()) as {
     name?: unknown;
     imageBase64?: unknown;
@@ -171,39 +185,47 @@ async function createPerson(request: Request, userId: string): Promise<Response>
   }
   const contentType = typeof body.contentType === 'string' ? body.contentType : 'image/jpeg';
   const buffer = Buffer.from(body.imageBase64, 'base64');
-  const key = `${userId}/${randomUUID()}`;
+  const key = `${ctx.orgId}/${randomUUID()}`;
   await putObject(PEOPLE_BUCKET, key, buffer, contentType);
   const [row] = await db
     .insert(people)
-    .values({ userId, name: body.name.trim(), bucketKey: key, contentType })
+    .values({
+      organizationId: ctx.orgId,
+      createdBy: ctx.userId,
+      createdByName: ctx.userName,
+      name: body.name.trim(),
+      bucketKey: key,
+      contentType,
+    })
     .returning();
   return json(request, 201, {
     id: row.id,
     name: row.name,
+    createdByName: row.createdByName,
     createdAt: row.createdAt,
     photoUrl: await presignGet(PEOPLE_BUCKET, row.bucketKey),
   });
 }
 
-async function deletePerson(request: Request, userId: string, id: string): Promise<Response> {
+async function deletePerson(request: Request, ctx: Ctx, id: string): Promise<Response> {
   const [row] = await db
     .select()
     .from(people)
-    .where(and(eq(people.id, id), eq(people.userId, userId)))
+    .where(and(eq(people.id, id), eq(people.organizationId, ctx.orgId)))
     .limit(1);
   if (!row) return json(request, 404, { error: 'Not found' });
   await deleteObject(PEOPLE_BUCKET, row.bucketKey).catch((e) =>
     console.error('[people] delete object failed:', e),
   );
-  await db.delete(people).where(and(eq(people.id, id), eq(people.userId, userId)));
+  await db.delete(people).where(and(eq(people.id, id), eq(people.organizationId, ctx.orgId)));
   return json(request, 200, { deleted: id });
 }
 
-async function listImages(request: Request, userId: string): Promise<Response> {
+async function listImages(request: Request, ctx: Ctx): Promise<Response> {
   const rows = await db
     .select()
     .from(images)
-    .where(eq(images.userId, userId))
+    .where(eq(images.organizationId, ctx.orgId))
     .orderBy(desc(images.createdAt));
   const result = await Promise.all(
     rows.map(async (row) => ({
@@ -211,6 +233,7 @@ async function listImages(request: Request, userId: string): Promise<Response> {
       prompt: row.prompt,
       contentType: row.contentType,
       bytes: row.bytes,
+      createdByName: row.createdByName,
       createdAt: row.createdAt,
       url: await presignGet(GENERATED_BUCKET, row.bucketKey),
     })),
@@ -218,7 +241,7 @@ async function listImages(request: Request, userId: string): Promise<Response> {
   return json(request, 200, { images: result });
 }
 
-async function patchImage(request: Request, userId: string, id: string): Promise<Response> {
+async function patchImage(request: Request, ctx: Ctx, id: string): Promise<Response> {
   const body = (await request.json()) as { prompt?: unknown };
   if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
     return json(request, 400, { error: 'prompt must be a non-empty string' });
@@ -226,35 +249,35 @@ async function patchImage(request: Request, userId: string, id: string): Promise
   const [row] = await db
     .update(images)
     .set({ prompt: body.prompt.trim() })
-    .where(and(eq(images.id, id), eq(images.userId, userId)))
+    .where(and(eq(images.id, id), eq(images.organizationId, ctx.orgId)))
     .returning({ id: images.id, prompt: images.prompt });
   if (!row) return json(request, 404, { error: 'Not found' });
   return json(request, 200, { image: row });
 }
 
-async function deleteImage(request: Request, userId: string, id: string): Promise<Response> {
+async function deleteImage(request: Request, ctx: Ctx, id: string): Promise<Response> {
   const [row] = await db
     .select()
     .from(images)
-    .where(and(eq(images.id, id), eq(images.userId, userId)))
+    .where(and(eq(images.id, id), eq(images.organizationId, ctx.orgId)))
     .limit(1);
   if (!row) return json(request, 404, { error: 'Not found' });
   await deleteObject(GENERATED_BUCKET, row.bucketKey).catch((e) =>
     console.error('[images] delete object failed:', e),
   );
-  await db.delete(images).where(and(eq(images.id, id), eq(images.userId, userId)));
+  await db.delete(images).where(and(eq(images.id, id), eq(images.organizationId, ctx.orgId)));
   return json(request, 200, { deleted: id });
 }
 
 async function loadReferenceImages(
-  userId: string,
+  orgId: string,
   personIds: string[],
 ): Promise<ReferenceImagePart[]> {
   if (personIds.length === 0) return [];
   const rows = await db
     .select()
     .from(people)
-    .where(and(eq(people.userId, userId), inArray(people.id, personIds)));
+    .where(and(eq(people.organizationId, orgId), inArray(people.id, personIds)));
   const parts: ReferenceImagePart[] = [];
   for (const row of rows) {
     try {
